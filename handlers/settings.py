@@ -1,4 +1,4 @@
-# settings.py (Full Code with User-Controlled Ghost Channel Removal)
+# settings.py
 
 import asyncio
 import base64
@@ -237,7 +237,9 @@ async def my_files_handler(client, query):
             if not files_on_page: text += "No more files found on this page."
             else:
                 for file in files_on_page:
-                    deep_link = f"https://t.me/{client.me.username}?start=ownerget_{file['file_unique_id']}"
+                    # --- BUG FIX: Create a composite ID for the deep link ---
+                    composite_id = f"{file['owner_id']}_{file['file_unique_id']}"
+                    deep_link = f"https://t.me/{client.me.username}?start=ownerget_{composite_id}"
                     text += f"**File:** `{file['file_name']}`\n**Link:** [Click Here to Get File]({deep_link})\n\n"
         buttons, nav_row = [], []
         if page > 1: nav_row.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"my_files_{page-1}"))
@@ -256,7 +258,9 @@ async def _format_and_send_search_results(client, query, user_id, search_query, 
     if not files_list: text += "No files found for your query."
     else:
         for file in files_list:
-            deep_link = f"https://t.me/{client.me.username}?start=ownerget_{file['file_unique_id']}"
+            # --- BUG FIX: Create a composite ID for the deep link in search results ---
+            composite_id = f"{file['owner_id']}_{file['file_unique_id']}"
+            deep_link = f"https://t.me/{client.me.username}?start=ownerget_{composite_id}"
             text += f"**File:** `{file['file_name']}`\n**Link:** [Click Here to Get File]({deep_link})\n\n"
     buttons, nav_row = [], []
     encoded_query = base64.urlsafe_b64encode(search_query.encode()).decode().strip("=")
@@ -402,9 +406,6 @@ async def remove_footer_handler(client, query):
     await query.answer("Button removed!", show_alert=True)
     await manage_footer_handler(client, query)
 
-# ================================================================= #
-# VVVVVV SMART FIX: User ko valid aur ghost channels dikhaye jayenge VVVVVV #
-# ================================================================= #
 @Client.on_callback_query(filters.regex(r"manage_(post|db)_ch"))
 async def manage_channels_handler(client, query):
     user_id, ch_type = query.from_user.id, query.data.split("_")[1]
@@ -430,9 +431,9 @@ async def manage_channels_handler(client, query):
                 chat = await client.get_chat(ch_id)
                 member = await client.get_chat_member(ch_id, "me")
                 if member.status not in [enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER]:
-                     buttons.append([InlineKeyboardButton(f"⚠️ Admin rights needed in {chat.title}", callback_data=f"rm_{ch_type}_{ch_id}")])
+                    buttons.append([InlineKeyboardButton(f"⚠️ Admin rights needed in {chat.title}", callback_data=f"rm_{ch_type}_{ch_id}")])
                 else:
-                     buttons.append([InlineKeyboardButton(f"✅ {chat.title}", callback_data=f"rm_{ch_type}_{ch_id}")])
+                    buttons.append([InlineKeyboardButton(f"✅ {chat.title}", callback_data=f"rm_{ch_type}_{ch_id}")])
             except Exception as e:
                 logger.warning(f"Could not access channel {ch_id} for user {user_id}. Error: {e}")
                 buttons.append([InlineKeyboardButton(f"👻 Ghost Channel - Click to Remove", callback_data=f"rm_{ch_type}_{ch_id}")])
@@ -449,7 +450,6 @@ async def remove_channel_handler(client, query):
     _, ch_type, ch_id_str = query.data.split("_")
     await remove_from_list(query.from_user.id, f"{ch_type}_channels", int(ch_id_str))
     await query.answer("Channel removed!", show_alert=True)
-    # Refresh the menu after removing the channel
     query.data = f"manage_{ch_type}_ch"
     await manage_channels_handler(client, query)
 
@@ -465,7 +465,6 @@ async def add_channel_prompt(client, query):
         if not user_settings:
             return await query.answer("Could not find your profile. Please /start the bot again.", show_alert=True)
 
-    # Check the limit based on the current state of the DB
     current_channels = user_settings.get(ch_type_key, [])
     limit = 1 if ch_type_short == 'db' else 3
     if len(current_channels) >= limit:
