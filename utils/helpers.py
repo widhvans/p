@@ -1,5 +1,3 @@
-# helpers.py
-
 import re
 import base64
 import logging
@@ -15,17 +13,12 @@ logger = logging.getLogger(__name__)
 
 FILES_PER_POST = 20
 
-
 def clean_filename(name: str):
-    """
-    The definitive 'champion pro' filename cleaner.
-    """
     if not name:
         return "Untitled", "Untitled", None
 
     try:
         processed_name = name.replace('.', ' ').replace('_', ' ')
-        
         parsed_info = PTN.parse(processed_name)
         base_title = parsed_info.get('title')
         year = str(parsed_info.get('year')) if parsed_info.get('year') else None
@@ -46,32 +39,23 @@ def clean_filename(name: str):
 
     except Exception:
         logger.warning(f"PTN failed for '{name}'. Using the robust regex fallback.")
-        
         fallback_name = re.sub(r'\.[^.]*$', '', name)
         fallback_name = fallback_name.replace('.', ' ').replace('_', ' ').strip()
         fallback_name = re.sub(r'\s*\(\d{4}\)\s*', '', fallback_name).strip()
         fallback_name = re.sub(r'\s*\[.*?\]\s*', '', fallback_name).strip()
-
         match = re.split(r'\b(19|20)\d{2}\b|720p|1080p|4k|webrip|web-dl|bluray|hdrip', fallback_name, maxsplit=1, flags=re.I)
         final_title = match[0].strip()
-        
         if not final_title:
             final_title = fallback_name
-
         return final_title, final_title, None
 
-
 async def create_post(client, user_id, messages):
-    """
-    Creates a professionally designed post with wrapped title and footer line.
-    """
     user = await get_user(user_id)
     if not user: return []
     first_media_obj = getattr(messages[0], messages[0].media.value, None)
     if not first_media_obj: return []
 
     primary_base_title, _, year = clean_filename(first_media_obj.file_name)
-    
     cleaned_primary_title = re.sub(r'@\S+', '', primary_base_title)
     cleaned_primary_title = re.sub(r'Join Us On Telegram', '', cleaned_primary_title, flags=re.IGNORECASE)
     cleaned_primary_title = cleaned_primary_title.strip()
@@ -86,9 +70,7 @@ async def create_post(client, user_id, messages):
     messages.sort(key=similarity_sorter)
     
     base_caption_header = f"🎬 **{cleaned_primary_title} {f'({year})' if year else ''}**"
-    
     post_poster = await get_poster(cleaned_primary_title, year) if user.get('show_poster', True) else None
-    
     footer_buttons = user.get('footer_buttons', [])
     footer_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(btn['name'], url=btn['url'])] for btn in footer_buttons]) if footer_buttons else None
     
@@ -106,30 +88,37 @@ async def create_post(client, user_id, messages):
             if not media: continue
             
             _, full_cleaned_label, _ = clean_filename(media.file_name)
-            
             label_no_mentions = re.sub(r'@\S+', '', full_cleaned_label)
             label_no_mentions = re.sub(r'Join Us On Telegram', '', label_no_mentions, flags=re.IGNORECASE)
             label_no_mentions = label_no_mentions.strip()
 
+            # Deep metadata extraction
             parsed_info = PTN.parse(media.file_name)
-            extra_tags = [
-                parsed_info.get('resolution'),
-                parsed_info.get('quality'),
-                parsed_info.get('audio'),
-                parsed_info.get('codec'),
-                parsed_info.get('group')
-            ]
-            filtered_text = " | ".join(tag for tag in extra_tags if tag)
+            metadata_tags = []
+            if parsed_info.get('resolution'):
+                metadata_tags.append(parsed_info['resolution'])
+            if parsed_info.get('quality'):
+                metadata_tags.append(parsed_info['quality'])
+            if parsed_info.get('audio'):
+                metadata_tags.append(parsed_info['audio'])
+            if parsed_info.get('codec'):
+                metadata_tags.append(parsed_info['codec'])
+            if parsed_info.get('group'):
+                metadata_tags.append(parsed_info['group'])
+            if parsed_info.get('season'):
+                metadata_tags.append(f"S{str(parsed_info['season']).zfill(2)}")
+            if parsed_info.get('episode'):
+                metadata_tags.append(f"E{str(parsed_info['episode']).zfill(2)}")
+            if parsed_info.get('language'):
+                langs = parsed_info['language'] if isinstance(parsed_info['language'], list) else [parsed_info['language']]
+                metadata_tags.extend(langs)
+            filtered_text = " | ".join(tag for tag in metadata_tags if tag)
 
             link = f"http://{Config.VPS_IP}:{Config.VPS_PORT}/get/{media.file_unique_id}"
-            
             file_entry = f"📁 `{label_no_mentions or media.file_name}`"
-            
             if filtered_text:
                 file_entry += f"\n    `{filtered_text}`"
-            
             file_entry += f"\n    [➤ Click Here]({link})"
-            
             links.append(file_entry)
 
         final_caption = f"{header_line}\n{header}\n{header_line}\n\n" + "\n\n".join(links)
@@ -138,7 +127,6 @@ async def create_post(client, user_id, messages):
         posts.append((post_poster, final_caption, footer_keyboard))
         
     return posts
-
 
 def get_title_key(filename: str) -> str:
     base_title, _, _ = clean_filename(filename)
@@ -185,23 +173,13 @@ async def get_main_menu(user_id):
     keyboard = InlineKeyboardMarkup(buttons)
     return menu_text, keyboard
 
-# ================================================================= #
-# VVVVVV BUG FIX: Ab yeh function sabhi tarah ke invalid channels ko remove karega VVVVVV #
-# ================================================================= #
 async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel_type):
-    """
-    Checks if a channel is accessible. If not, notifies the user and removes the invalid
-    channel ID from the database to prevent errors.
-    """
     db_key = f"{channel_type.lower()}_channels"
     try:
-        # Try a lightweight check first
         await client.get_chat_member(channel_id, "me")
         return True
     except (UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate) as e:
-        # These are expected errors when bot loses access.
         logger.warning(f"Channel {channel_id} is inaccessible due to '{type(e).__name__}'. Removing from DB for user {user_id}.")
-        
         error_text = (
             f"⚠️ **Channel Inaccessible**\n\n"
             f"Your {channel_type.title()} Channel (ID: `{channel_id}`) is no longer accessible. "
@@ -209,24 +187,19 @@ async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel
             f"It has been automatically removed from your settings."
         )
         try:
-            # Notify the user and remove the faulty ID from the database
             await client.send_message(user_id, error_text)
             await remove_from_list(user_id, db_key, channel_id)
         except Exception as notify_error:
             logger.error(f"Failed to notify or remove channel for user {user_id}. Error: {notify_error}")
         return False
     except Exception as e:
-        # This catches any other unexpected error (like the one in the logs).
-        # We assume the channel is invalid and remove it to prevent future bugs.
         logger.error(f"An unexpected error occurred while checking channel {channel_id}: {e}. Assuming invalid and removing.")
-        
         error_text = (
             f"🗑️ **Auto-Clean**\n\n"
             f"An unexpected error occurred with one of your saved {channel_type.title()} Channels (ID: `{channel_id}`). "
             f"To prevent issues, this invalid entry has been removed from your settings."
         )
         try:
-            # Notify the user and remove the faulty ID
             await client.send_message(user_id, error_text)
             await remove_from_list(user_id, db_key, channel_id)
         except Exception as notify_error:
