@@ -1,5 +1,3 @@
-# start.py
-
 import logging
 import re
 from pyrogram import Client, filters, enums
@@ -12,44 +10,33 @@ from features.shortener import get_shortlink
 
 logger = logging.getLogger(__name__)
 
-
 @Client.on_message(filters.private & ~filters.command("start") & (filters.document | filters.video | filters.audio))
 async def handle_private_file(client, message):
     if not client.owner_db_channel_id:
         return await message.reply_text("The bot is not yet configured by the admin. Please try again later.")
-    
     processing_msg = await message.reply_text("⏳ Processing your file...", quote=True)
-    
     try:
-        # Get the media object correctly to prevent crash
-        media = getattr(message, message.media.value, None)
-        if not media:
-            return await processing_msg.edit_text("Could not process this file type.")
-
         copied_message = await message.copy(client.owner_db_channel_id)
         download_link = f"http://{client.vps_ip}:{client.vps_port}/download/{copied_message.id}"
-        
         buttons = [
             [InlineKeyboardButton("📥 Fast Download", url=download_link)]
         ]
         keyboard = InlineKeyboardMarkup(buttons)
-        
         await client.send_cached_media(
             chat_id=message.chat.id,
-            file_id=media.file_id,  # <-- BUG FIX HERE
-            caption=f"`{media.file_name}`", # <-- BUG FIX HERE
+            file_id=message.media.file_id,
+            caption=f"`{message.media.file_name}`",
             reply_markup=keyboard,
             quote=True
         )
         await processing_msg.delete()
-        
     except Exception as e:
         logger.exception("Error in handle_private_file")
         await processing_msg.edit_text(f"An error occurred: {e}")
 
-async def send_file(client, user_id, file_unique_id):
+async def send_file(client, user_id, file_unique_id, owner_id=None):
     try:
-        file_data = await get_file_by_unique_id(file_unique_id)
+        file_data = await get_file_by_unique_id(file_unique_id, owner_id)
         if not file_data:
             return await client.send_message(user_id, "Sorry, this file is no longer available.")
         
@@ -62,7 +49,6 @@ async def send_file(client, user_id, file_unique_id):
             return await client.send_message(user_id, "A configuration error occurred on the bot.")
 
         download_link = f"http://{client.vps_ip}:{client.vps_port}/download/{file_data['stream_id']}"
-        
         buttons = [
             [InlineKeyboardButton("📥 Fast Download", url=download_link)]
         ]
@@ -93,7 +79,6 @@ async def send_file(client, user_id, file_unique_id):
         logger.exception("Error in send_file function")
         await client.send_message(user_id, "Something went wrong while sending the file.")
 
-
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
     if message.from_user.is_bot: return
@@ -105,24 +90,24 @@ async def start_command(client, message):
         try:
             if payload.startswith("finalget_"):
                 _, file_unique_id = payload.split("_", 1)
-                
                 file_data = await get_file_by_unique_id(file_unique_id)
                 if file_data:
                     owner_id = file_data['owner_id']
                     owner_settings = await get_user(owner_id)
-                    
                     if owner_settings and owner_settings.get('shortener_mode') == '12_hour':
                         was_already_verified = await is_user_verified(user_id, owner_id)
                         claim_successful = await claim_verification_for_file(file_unique_id, user_id, owner_id)
-                        
                         if claim_successful and not was_already_verified:
                             await client.send_message(user_id, "✅ **Verification Successful!**\n\nYou can now get direct links from this user's channels for the next 12 hours.")
-                
-                await send_file(client, user_id, file_unique_id)
+                await send_file(client, user_id, file_unique_id, owner_id)
 
             elif payload.startswith("ownerget_"):
                 _, file_unique_id = payload.split("_", 1)
-                await send_file(client, user_id, file_unique_id)
+                file_data = await get_file_by_unique_id(file_unique_id)
+                if file_data:
+                    await send_file(client, user_id, file_unique_id, file_data['owner_id'])
+                else:
+                    await client.send_message(user_id, "File not found.")
 
             elif payload.startswith("get_"):
                 await handle_public_file_request(client, message, user_id, payload)
@@ -145,16 +130,13 @@ async def start_command(client, message):
             "› Full customization of captions, posters, and buttons.\n\n"
             "Click **Let's Go 🚀** to open your settings menu and begin!"
         )
-        
         keyboard = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("Let's Go 🚀", callback_data=f"go_back_{user_id}")],
                 [InlineKeyboardButton("Tutorial 🎬", url=Config.TUTORIAL_URL)]
             ]
         )
-        
         await message.reply_text(text, reply_markup=keyboard)
-
 
 async def handle_public_file_request(client, message, user_id, payload):
     file_unique_id = payload.split("_", 1)[1]
