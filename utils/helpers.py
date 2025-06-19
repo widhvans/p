@@ -3,7 +3,7 @@ import base64
 import logging
 import PTN
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate
+from pyrogram.errors import UserNotParticipant, ChatAdminRequired, ChannelInvalid, ChannelPrivate, PeerIdInvalid
 from config import Config
 from database.db import get_user, remove_from_list
 from features.poster import get_poster
@@ -17,15 +17,15 @@ def clean_filename(name: str):
     if not name:
         return "Untitled", "Untitled", None, []
 
-    # Step 1: Aggressive preprocessing
-    processed_name = re.sub(r'\[@\w+\]|\[\w+\]', '', name, flags=re.I)  # Remove [@Channel] and [Tags]
-    processed_name = re.sub(r'[._]{2,}', ' ', processed_name)  # Replace multiple . or _ with space
-    processed_name = re.sub(r'[^\w\s\d]', ' ', processed_name)  # Replace other symbols with space
+    # Step 1: Comprehensive preprocessing
+    processed_name = re.sub(r'\[.*?]|\{.*?\}|\(.*?\)', '', name, flags=re.I)  # Remove [Tags], {Tags}, (Tags)
+    processed_name = re.sub(r'[@][A-Za-z0-9_]+', '', processed_name)  # Remove @Channel
+    processed_name = re.sub(r'[._-]+', ' ', processed_name)  # Replace ._- with space
     processed_name = re.sub(r'\s+', ' ', processed_name).strip()  # Normalize spaces
-    processed_name = processed_name[:200]  # Limit to avoid parsing issues
+    processed_name = processed_name[:250]  # Safe length limit
 
     try:
-        # Step 2: Try PTN parsing
+        # Step 2: PTN parsing
         parsed_info = PTN.parse(processed_name)
         base_title = parsed_info.get('title')
         year = str(parsed_info.get('year')) if parsed_info.get('year') else None
@@ -60,27 +60,28 @@ def clean_filename(name: str):
         return base_title.strip(), full_title.strip(), year, metadata_tags
 
     except Exception as e:
-        logger.warning(f"PTN failed for '{name}'. Error: {e}. Using custom fallback.")
-        # Step 3: Custom fallback parsing
-        fallback_name = re.sub(r'\.[^.]*$', '', processed_name)  # Remove extension
-        # Extract title before common metadata patterns
-        match = re.split(r'\b(19|20)\d{2}\b|S\d{2}E\d{2}|480p|720p|1080p|4k|webrip|web-dl|bluray|hdrip|hevc|x264|x265|es|esubs|dual|audio|multi\b', fallback_name, flags=re.I)
-        base_title = match[0].strip() if match else fallback_name
-        base_title = re.sub(r'\s+', ' ', base_title).strip()
+        logger.warning(f"PTN failed for '{name}'. Error: {e}. Using custom parsing.")
+        # Step 3: Custom parsing
+        fallback_name = re.sub(r'\.[^.]+$', '', processed_name)  # Remove extension
+        # Split at metadata boundaries
+        patterns = r'\b((19|20)\d{2}|S\d{2}E\d{2}|480p|720p|1080p|4k|webrip|web-dl|bluray|hdrip|hevc|x264|x265|dual|multi|es|esub)\b'
+        match = re.split(patterns, fallback_name, flags=re.I)
+        base_title = match[0].strip() if match and match[0].strip() else fallback_name.strip()
 
-        # Extract metadata manually
+        # Extract metadata
         metadata_tags = []
-        if re.search(r'\b(480p|720p|1080p|4k)\b', processed_name, re.I):
-            metadata_tags.append(re.search(r'\b(480p|720p|1080p|4k)\b', processed_name, re.I).group(0))
-        if re.search(r'\b(webrip|web-dl|bluray|hdrip)\b', processed_name, re.I):
-            metadata_tags.append(re.search(r'\b(webrip|web-dl|bluray|hdrip)\b', processed_name, re.I).group(0))
-        if re.search(r'\b(hevc|x264|x265)\b', processed_name, re.I):
-            metadata_tags.append(re.search(r'\b(hevc|x264|x265)\b', processed_name, re.I).group(0))
-        if re.search(r'\b(dual|multi)\b', processed_name, re.I):
-            metadata_tags.append(re.search(r'\b(dual|multi)\b', processed_name, re.I).group(0) + " Audio")
-        if re.search(r'\b(es|esubs)\b', processed_name, re.I):
-            metadata_tags.append('ESub')
-        season_episode = re.search(r'\bS(\d{2})E(\d{2})\b', processed_name, re.I)
+        for part in match[1:]:
+            if re.match(r'(480p|720p|1080p|4k)', part, re.I):
+                metadata_tags.append(part)
+            elif re.match(r'(webrip|web-dl|bluray|hdrip)', part, re.I):
+                metadata_tags.append(part)
+            elif re.match(r'(hevc|x264|x265)', part, re.I):
+                metadata_tags.append(part)
+            elif re.match(r'(dual|multi)', part, re.I):
+                metadata_tags.append(f"{part} Audio")
+            elif re.match(r'(es|esub)', part, re.I):
+                metadata_tags.append('ESub')
+        season_episode = re.search(r'S(\d{2})E(\d{2})', processed_name, re.I)
         if season_episode:
             metadata_tags.extend([f"S{season_episode.group(1)}", f"E{season_episode.group(2)}"])
 
@@ -95,16 +96,19 @@ def clean_filename(name: str):
 
 async def create_post(client, user_id, messages):
     user = await get_user(user_id)
-    if not user: return []
+    if not user:
+        return []
     first_media_obj = getattr(messages[0], messages[0].media.value, None)
-    if not first_media_obj: return []
+    if not first_media_obj:
+        return []
 
     primary_base_title, _, year, _ = clean_filename(first_media_obj.file_name)
-    cleaned_primary_title = re.sub(r'@\S+|Join Us On Telegram', '', primary_base_title, flags=re.I).strip()
+    cleaned_primary_title = re.sub(r'[@][A-Za-z0-9_]+|Join Us On Telegram', '', primary_base_title, flags=re.I).strip()
 
     def similarity_sorter(msg):
         media_obj = getattr(msg, msg.media.value, None)
-        if not media_obj: return (1.0, "")
+        if not media_obj:
+            return (1.0, "")
         base, _, _, _ = clean_filename(media_obj.file_name)
         similarity_score = 1.0 - calculate_title_similarity(cleaned_primary_title, base)
         natural_key = natural_sort_key(media_obj.file_name)
@@ -127,10 +131,11 @@ async def create_post(client, user_id, messages):
         links = []
         for m in chunk:
             media = getattr(m, m.media.value, None)
-            if not media: continue
+            if not media:
+                continue
             
             _, full_cleaned_label, _, metadata_tags = clean_filename(media.file_name)
-            label_no_mentions = re.sub(r'@\S+|Join Us On Telegram', '', full_cleaned_label, flags=re.I).strip()
+            label_no_mentions = re.sub(r'[@][A-Za-z0-9_]+|Join Us On Telegram', '', full_cleaned_label, flags=re.I).strip()
 
             filtered_text = " | ".join(tag for tag in metadata_tags if tag)
 
@@ -150,7 +155,7 @@ async def create_post(client, user_id, messages):
 
 def get_title_key(filename: str) -> str:
     base_title, _, _, _ = clean_filename(filename)
-    cleaned_base_title = re.sub(r'@\S+|Join Us On Telegram', '', base_title, flags=re.I).strip()
+    cleaned_base_title = re.sub(r'[@][A-Za-z0-9_]+|Join Us On Telegram', '', base_title, flags=re.I).strip()
     return cleaned_base_title.lower()
 
 async def get_main_menu(user_id):
@@ -232,10 +237,14 @@ def go_back_button(user_id):
     return InlineKeyboardMarkup([[InlineKeyboardButton("« Go Back", callback_data=f"go_back_{user_id}")]])
 
 def format_bytes(size):
-    if not isinstance(size, (int, float)): return "N/A"
-    power = 1024; n = 0; power_labels = {0: 'B', 1: 'KB', 2: 'MB', 3: 'GB', 4: 'TB'}
+    if not isinstance(size, (int, float)):
+        return "N/A"
+    power = 1024
+    n = 0
+    power_labels = {0: 'B', 1: 'KB', 2: 'MB', 3: 'GB', 4: 'TB'}
     while size > power and n < len(power_labels) - 1:
-        size /= power; n += 1
+        size /= power
+        n += 1
     return f"{size:.2f} {power_labels[n]}"
 
 async def get_file_raw_link(message):
