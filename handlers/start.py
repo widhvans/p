@@ -1,5 +1,3 @@
-# start.py
-
 import logging
 import re
 from pyrogram import Client, filters, enums
@@ -17,49 +15,43 @@ logger = logging.getLogger(__name__)
 async def handle_private_file(client, message):
     if not client.owner_db_channel_id:
         return await message.reply_text("The bot is not yet configured by the admin. Please try again later.")
-    
     processing_msg = await message.reply_text("⏳ Processing your file...", quote=True)
-    
     try:
-        # Get the media object correctly to prevent crash
-        media = getattr(message, message.media.value, None)
-        if not media:
-            return await processing_msg.edit_text("Could not process this file type.")
-
         copied_message = await message.copy(client.owner_db_channel_id)
         download_link = f"http://{client.vps_ip}:{client.vps_port}/download/{copied_message.id}"
-        
+        # The button is renamed here.
         buttons = [
             [InlineKeyboardButton("📥 Fast Download", url=download_link)]
         ]
         keyboard = InlineKeyboardMarkup(buttons)
-        
         await client.send_cached_media(
             chat_id=message.chat.id,
-            file_id=media.file_id,  # <-- BUG FIX HERE
-            caption=f"`{media.file_name}`", # <-- BUG FIX HERE
+            file_id=message.media.file_id,
+            caption=f"`{message.media.file_name}`",
             reply_markup=keyboard,
             quote=True
         )
         await processing_msg.delete()
-        
     except Exception as e:
         logger.exception("Error in handle_private_file")
         await processing_msg.edit_text(f"An error occurred: {e}")
 
-async def send_file(client, user_id, file_unique_id):
+# --- BUG FIX: Function signature updated to handle user-specific files ---
+async def send_file(client, requester_id, owner_id, file_unique_id):
+    """Sends the correct, user-owned file to the person who requested it."""
     try:
-        file_data = await get_file_by_unique_id(file_unique_id)
+        # --- BUG FIX: Fetch the file using both owner_id and file_unique_id ---
+        file_data = await get_file_by_unique_id(owner_id, file_unique_id)
         if not file_data:
-            return await client.send_message(user_id, "Sorry, this file is no longer available.")
+            return await client.send_message(requester_id, "Sorry, this file is no longer available or the link is invalid.")
         
-        owner_id = file_data['owner_id']
-        owner_settings = await get_user(owner_id)
+        # The owner_id is now known and correct from the file_data
+        owner_settings = await get_user(file_data['owner_id'])
 
         storage_channel_id = await get_owner_db_channel()
         if not storage_channel_id:
             logger.error("Owner DB Channel not set, cannot send file.")
-            return await client.send_message(user_id, "A configuration error occurred on the bot.")
+            return await client.send_message(requester_id, "A configuration error occurred on the bot.")
 
         download_link = f"http://{client.vps_ip}:{client.vps_port}/download/{file_data['stream_id']}"
         
@@ -82,7 +74,7 @@ async def send_file(client, user_id, file_unique_id):
         caption = f"✅ **Here is your file!**\n\n{filename_part}"
 
         await client.copy_message(
-            chat_id=user_id,
+            chat_id=requester_id,
             from_chat_id=storage_channel_id,
             message_id=file_data['file_id'],
             caption=caption,
@@ -91,45 +83,55 @@ async def send_file(client, user_id, file_unique_id):
         )
     except Exception:
         logger.exception("Error in send_file function")
-        await client.send_message(user_id, "Something went wrong while sending the file.")
+        await client.send_message(requester_id, "Something went wrong while sending the file.")
 
 
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
     if message.from_user.is_bot: return
-    user_id = message.from_user.id
-    await add_user(user_id)
+    requester_id = message.from_user.id
+    await add_user(requester_id)
     
     if len(message.command) > 1:
         payload = message.command[1]
         try:
+            # --- BUG FIX: Logic updated to parse composite IDs (owner_id + file_unique_id) ---
             if payload.startswith("finalget_"):
-                _, file_unique_id = payload.split("_", 1)
+                # Payload format: finalget_{owner_id}_{file_unique_id}
+                _, owner_id_str, file_unique_id = payload.split("_", 2)
+                owner_id = int(owner_id_str)
                 
-                file_data = await get_file_by_unique_id(file_unique_id)
+                file_data = await get_file_by_unique_id(owner_id, file_unique_id)
                 if file_data:
-                    owner_id = file_data['owner_id']
                     owner_settings = await get_user(owner_id)
                     
                     if owner_settings and owner_settings.get('shortener_mode') == '12_hour':
-                        was_already_verified = await is_user_verified(user_id, owner_id)
-                        claim_successful = await claim_verification_for_file(file_unique_id, user_id, owner_id)
+                        was_already_verified = await is_user_verified(requester_id, owner_id)
+                        # Call claim_verification with the correct owner and file IDs
+                        claim_successful = await claim_verification_for_file(owner_id, file_unique_id, requester_id)
                         
                         if claim_successful and not was_already_verified:
-                            await client.send_message(user_id, "✅ **Verification Successful!**\n\nYou can now get direct links from this user's channels for the next 12 hours.")
-                
-                await send_file(client, user_id, file_unique_id)
+                            await client.send_message(requester_id, "✅ **Verification Successful!**\n\nYou can now get direct links from this user's channels for the next 12 hours.")
+            
+                await send_file(client, requester_id, owner_id, file_unique_id)
 
             elif payload.startswith("ownerget_"):
-                _, file_unique_id = payload.split("_", 1)
-                await send_file(client, user_id, file_unique_id)
+                # Payload format: ownerget_{owner_id}_{file_unique_id}
+                _, owner_id_str, file_unique_id = payload.split("_", 2)
+                owner_id = int(owner_id_str)
+                # A user can only get their own file via this link
+                if requester_id == owner_id:
+                    await send_file(client, requester_id, owner_id, file_unique_id)
+                else:
+                    await message.reply_text("This is a special link for the file owner only.")
+
 
             elif payload.startswith("get_"):
-                await handle_public_file_request(client, message, user_id, payload)
+                await handle_public_file_request(client, message, requester_id, payload)
 
         except Exception:
             logger.exception("Error processing deep link in /start")
-            await message.reply_text("Something went wrong.")
+            await message.reply_text("Something went wrong or the link is invalid.")
     else:
         text = (
             f"Hello {message.from_user.mention}! 👋\n\n"
@@ -148,7 +150,7 @@ async def start_command(client, message):
         
         keyboard = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("Let's Go 🚀", callback_data=f"go_back_{user_id}")],
+                [InlineKeyboardButton("Let's Go 🚀", callback_data=f"go_back_{requester_id}")],
                 [InlineKeyboardButton("Tutorial 🎬", url=Config.TUTORIAL_URL)]
             ]
         )
@@ -156,12 +158,19 @@ async def start_command(client, message):
         await message.reply_text(text, reply_markup=keyboard)
 
 
-async def handle_public_file_request(client, message, user_id, payload):
-    file_unique_id = payload.split("_", 1)[1]
-    file_data = await get_file_by_unique_id(file_unique_id)
+async def handle_public_file_request(client, message, requester_id, payload):
+    # --- BUG FIX: Parse the composite key from the payload ---
+    # Payload format: get_{owner_id}_{file_unique_id}
+    try:
+        _, owner_id_str, file_unique_id = payload.split("_", 2)
+        owner_id = int(owner_id_str)
+    except ValueError:
+        return await message.reply_text("The link is invalid or corrupted.")
+
+    file_data = await get_file_by_unique_id(owner_id, file_unique_id)
     if not file_data: return await message.reply_text("File not found or link has expired.")
     
-    owner_id = file_data['owner_id']
+    # Now, owner_id is correctly identified from the link itself.
     owner_settings = await get_user(owner_id)
     
     fsub_channel = owner_settings.get('fsub_channel')
@@ -169,10 +178,11 @@ async def handle_public_file_request(client, message, user_id, payload):
         try:
             await client.get_chat_member(chat_id=fsub_channel, user_id="me")
             try:
-                await client.get_chat_member(chat_id=fsub_channel, user_id=user_id)
+                await client.get_chat_member(chat_id=fsub_channel, user_id=requester_id)
             except UserNotParticipant:
                 try: invite_link = await client.export_chat_invite_link(fsub_channel)
                 except Exception: invite_link = None
+                # Pass the original payload to the retry button
                 buttons = [[InlineKeyboardButton("📢 Join Channel", url=invite_link)], [InlineKeyboardButton("🔄 Retry", callback_data=f"retry_{payload}")]]
                 return await message.reply_text("You must join the channel to continue.", reply_markup=InlineKeyboardMarkup(buttons))
         except (UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate) as e:
@@ -184,7 +194,9 @@ async def handle_public_file_request(client, message, user_id, payload):
     shortener_enabled = owner_settings.get('shortener_enabled', True)
     shortener_mode = owner_settings.get('shortener_mode', 'each_time')
     
-    final_delivery_link = f"https://t.me/{client.me.username}?start=finalget_{file_unique_id}"
+    # --- BUG FIX: Create final link with the composite ID ---
+    composite_id = f"{owner_id}_{file_unique_id}"
+    final_delivery_link = f"https://t.me/{client.me.username}?start=finalget_{composite_id}"
     text = ""
     buttons = []
 
@@ -197,7 +209,7 @@ async def handle_public_file_request(client, message, user_id, payload):
             shortened_link = await get_shortlink(final_delivery_link, owner_id)
             buttons.append([InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=shortened_link)])
         elif shortener_mode == '12_hour':
-            if await is_user_verified(user_id, owner_id):
+            if await is_user_verified(requester_id, owner_id):
                 text = "✅ **You are verified!**\n\nYour 12-hour verification is active. Click below to get your file directly."
                 buttons.append([InlineKeyboardButton("➡️ Get Your File Directly ⬅️", url=final_delivery_link)])
             else:
@@ -213,6 +225,7 @@ async def handle_public_file_request(client, message, user_id, payload):
 @Client.on_callback_query(filters.regex(r"^retry_"))
 async def retry_handler(client, query):
     await query.message.delete()
+    # The payload is already correct (e.g., "get_ownerid_fileid"), so we just pass it along
     await handle_public_file_request(client, query.message, query.from_user.id, query.data.split("_", 1)[1])
 
 @Client.on_callback_query(filters.regex(r"go_back_"))
