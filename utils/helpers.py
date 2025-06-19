@@ -17,8 +17,15 @@ def clean_filename(name: str):
     if not name:
         return "Untitled", "Untitled", None
 
+    # Preprocess: Remove promotional tags and excessive symbols
+    processed_name = re.sub(r'\[@\w+\]', '', name, flags=re.I)  # Remove [@Channel]
+    processed_name = re.sub(r'\[\w+\]', '', processed_name, flags=re.I)  # Remove other [Tags]
+    processed_name = re.sub(r'[-_]{2,}', ' ', processed_name)  # Replace multiple - or _ with space
+    processed_name = re.sub(r'[^\w\s\d]', ' ', processed_name)  # Replace other symbols with space
+    processed_name = re.sub(r'\s+', ' ', processed_name).strip()  # Normalize spaces
+
     try:
-        processed_name = name.replace('.', ' ').replace('_', ' ')
+        # Parse with PTN
         parsed_info = PTN.parse(processed_name)
         base_title = parsed_info.get('title')
         year = str(parsed_info.get('year')) if parsed_info.get('year') else None
@@ -26,6 +33,8 @@ def clean_filename(name: str):
         if not base_title:
             raise ValueError("PTN did not find a title, triggering fallback.")
 
+        # Construct full title with season and episode if present
+        full_title = base_title
         if 'season' in parsed_info and 'episode' in parsed_info:
             season = parsed_info.get('season')
             episode = parsed_info.get('episode')
@@ -33,20 +42,17 @@ def clean_filename(name: str):
             episode_name = parsed_info.get('episodeName')
             if episode_name:
                 full_title = f"{full_title} - {episode_name}"
-            return base_title.strip(), full_title.strip(), year
 
-        return base_title.strip(), base_title.strip(), year
+        return base_title.strip(), full_title.strip(), year
 
-    except Exception:
-        logger.warning(f"PTN failed for '{name}'. Using the robust regex fallback.")
-        fallback_name = re.sub(r'\.[^.]*$', '', name)
-        fallback_name = fallback_name.replace('.', ' ').replace('_', ' ').strip()
-        fallback_name = re.sub(r'\s*\(\d{4}\)\s*', '', fallback_name).strip()
-        fallback_name = re.sub(r'\s*\[.*?\]\s*', '', fallback_name).strip()
-        match = re.split(r'\b(19|20)\d{2}\b|720p|1080p|4k|webrip|web-dl|bluray|hdrip', fallback_name, maxsplit=1, flags=re.I)
-        final_title = match[0].strip()
-        if not final_title:
-            final_title = fallback_name
+    except Exception as e:
+        logger.warning(f"PTN failed for '{name}'. Error: {e}. Using enhanced regex fallback.")
+        # Enhanced fallback: Extract title before resolution/quality tags
+        fallback_name = re.sub(r'\.[^.]*$', '', processed_name)  # Remove extension
+        fallback_name = re.sub(r'\b(19|20)\d{2}\b.*$', '', fallback_name)  # Remove year and beyond
+        fallback_name = re.sub(r'\b(720p|1080p|4k|480p|webrip|web-dl|bluray|hdrip|hevc|x264|x265|es|esubs|dual|audio|multi|s\d{2}e\d{2})\b.*$', '', fallback_name, flags=re.I)  # Remove metadata
+        fallback_name = re.sub(r'\s+', ' ', fallback_name).strip()  # Normalize spaces
+        final_title = fallback_name or "Untitled"
         return final_title, final_title, None
 
 async def create_post(client, user_id, messages):
@@ -93,7 +99,12 @@ async def create_post(client, user_id, messages):
             label_no_mentions = label_no_mentions.strip()
 
             # Deep metadata extraction
-            parsed_info = PTN.parse(media.file_name)
+            processed_name = re.sub(r'\[@\w+\]', '', media.file_name, flags=re.I)
+            processed_name = re.sub(r'\[\w+\]', '', processed_name, flags=re.I)
+            processed_name = re.sub(r'[-_]{2,}', ' ', processed_name)
+            processed_name = re.sub(r'[^\w\s\d]', ' ', processed_name)
+            processed_name = re.sub(r'\s+', ' ', processed_name).strip()
+            parsed_info = PTN.parse(processed_name)
             metadata_tags = []
             if parsed_info.get('resolution'):
                 metadata_tags.append(parsed_info['resolution'])
@@ -112,6 +123,8 @@ async def create_post(client, user_id, messages):
             if parsed_info.get('language'):
                 langs = parsed_info['language'] if isinstance(parsed_info['language'], list) else [parsed_info['language']]
                 metadata_tags.extend(langs)
+            if 'subtitle' in parsed_info and parsed_info['subtitle']:
+                metadata_tags.append('ESub')
             filtered_text = " | ".join(tag for tag in metadata_tags if tag)
 
             link = f"http://{Config.VPS_IP}:{Config.VPS_PORT}/get/{media.file_unique_id}"
