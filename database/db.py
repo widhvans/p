@@ -23,7 +23,6 @@ async def add_user(user_id):
     }
     await users.update_one({'user_id': user_id}, {"$setOnInsert": user_data}, upsert=True)
 
-# ... (is_user_verified, add_user_verification, claim_verification_for_file functions remain unchanged) ...
 async def is_user_verified(requester_id: int, owner_id: int) -> bool:
     try:
         verification = await verified_users.find_one({'requester_id': requester_id, 'owner_id': owner_id})
@@ -42,15 +41,21 @@ async def add_user_verification(requester_id: int, owner_id: int):
         upsert=True
     )
 
-async def claim_verification_for_file(file_unique_id: str, requester_id: int, owner_id: int) -> bool:
-    unclaimed_file_query = {'file_unique_id': file_unique_id, 'verification_claimed': {'$ne': True}}
+# --- BUG FIX: Function signature and query updated ---
+async def claim_verification_for_file(owner_id: int, file_unique_id: str, requester_id: int) -> bool:
+    """Marks a file as 'verification claimed' for a specific owner to prevent reuse."""
+    unclaimed_file_query = {
+        'owner_id': owner_id, 
+        'file_unique_id': file_unique_id, 
+        'verification_claimed': {'$ne': True}
+    }
     result = await files.update_one(unclaimed_file_query, {'$set': {'verification_claimed': True}})
     if result.modified_count > 0:
+        # The user who clicked the link (requester_id) gets verified for the file's owner (owner_id)
         await add_user_verification(requester_id, owner_id)
         return True
     return False
 
-# --- NEW: Functions for Stream Channel ---
 async def set_stream_channel(channel_id: int):
     """Saves the global stream channel ID."""
     await bot_settings.update_one({'_id': 'stream_config'}, {'$set': {'channel_id': channel_id}}, upsert=True)
@@ -59,8 +64,6 @@ async def get_stream_channel():
     """Retrieves the global stream channel ID."""
     config = await bot_settings.find_one({'_id': 'stream_config'})
     return config.get('channel_id') if config else None
-# --- END NEW ---
-
 
 async def set_owner_db_channel(channel_id: int):
     await bot_settings.update_one({'_id': 'owner_db_config'}, {'$set': {'channel_id': channel_id}}, upsert=True)
@@ -69,7 +72,6 @@ async def get_owner_db_channel():
     config = await bot_settings.find_one({'_id': 'owner_db_config'})
     return config.get('channel_id') if config else None
 
-# --- MODIFIED: save_file_data now includes stream_message ---
 async def save_file_data(owner_id, original_message, copied_message, stream_message):
     """Saves file metadata, including the new stream_id."""
     from utils.helpers import get_file_raw_link
@@ -79,21 +81,21 @@ async def save_file_data(owner_id, original_message, copied_message, stream_mess
         'owner_id': owner_id,
         'file_unique_id': original_media.file_unique_id,
         'file_id': copied_message.id,
-        'stream_id': stream_message.id,  # Save the message ID from the stream channel
+        'stream_id': stream_message.id,
         'file_name': original_media.file_name,
         'file_size': original_media.file_size,
         'raw_link': raw_link
     }
+    # --- BUG FIX: The query now includes owner_id to make the document unique per user ---
+    # This is the most critical change. It creates a new document for each user-file pair.
     await files.update_one(
         {'owner_id': owner_id, 'file_unique_id': original_media.file_unique_id},
         {'$set': file_data}, upsert=True
     )
-# --- END MODIFIED ---
 
 async def get_user(user_id):
     return await users.find_one({'user_id': user_id})
 
-# ... (Rest of the db.py functions remain unchanged) ...
 async def get_all_user_ids(storage_owners_only=False):
     query = {}
     if storage_owners_only:
@@ -122,8 +124,12 @@ async def remove_from_list(user_id, list_name, item):
 async def find_owner_by_db_channel(channel_id):
     user = await users.find_one({'db_channels': channel_id})
     return user['user_id'] if user else None
-async def get_file_by_unique_id(file_unique_id: str):
-    return await files.find_one({'file_unique_id': file_unique_id})
+
+# --- BUG FIX: Function signature and query updated to fetch a user-specific file ---
+async def get_file_by_unique_id(owner_id: int, file_unique_id: str):
+    """Fetches a file based on its owner and unique_id."""
+    return await files.find_one({'owner_id': owner_id, 'file_unique_id': file_unique_id})
+
 async def get_user_file_count(owner_id):
     return await files.count_documents({'owner_id': owner_id})
 async def get_all_user_files(user_id):
