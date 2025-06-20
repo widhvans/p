@@ -13,8 +13,9 @@ from thefuzz import fuzz
 
 logger = logging.getLogger(__name__)
 
-FILES_PER_POST = 20
-
+# Telegram API limits
+PHOTO_CAPTION_LIMIT = 1024
+TEXT_MESSAGE_LIMIT = 4096
 
 def clean_filename(name: str):
     """
@@ -49,7 +50,7 @@ def clean_filename(name: str):
         
         fallback_name = re.sub(r'\.[^.]*$', '', name)
         fallback_name = fallback_name.replace('.', ' ').replace('_', ' ').strip()
-        fallback_name = re.sub(r'\s*\(\d{4}\)\s*', '', fallback_name).strip()
+        fallback_name = re.sub(r'\s*\(\d{4})\s*', '', fallback_name).strip()
         fallback_name = re.sub(r'\s*\[.*?\]\s*', '', fallback_name).strip()
 
         match = re.split(r'\b(19|20)\d{2}\b|720p|1080p|4k|webrip|web-dl|bluray|hdrip', fallback_name, maxsplit=1, flags=re.I)
@@ -60,10 +61,13 @@ def clean_filename(name: str):
 
         return final_title, final_title, None
 
-
+# ================================================================= #
+# VVVVVV SMART POST SPLITTING: Ab yeh function bade batches ko multiple posts mein split karega VVVVVV #
+# ================================================================= #
 async def create_post(client, user_id, messages):
     """
-    Creates a professionally designed post with wrapped title and footer line.
+    Creates professionally designed posts. If the content for one post is too long,
+    it automatically splits it into multiple, well-formed posts.
     """
     user = await get_user(user_id)
     if not user: return []
@@ -72,9 +76,8 @@ async def create_post(client, user_id, messages):
 
     primary_base_title, _, year = clean_filename(first_media_obj.file_name)
     
-    cleaned_primary_title = re.sub(r'@\S+', '', primary_base_title)
-    cleaned_primary_title = re.sub(r'Join Us On Telegram', '', cleaned_primary_title, flags=re.IGNORECASE)
-    cleaned_primary_title = cleaned_primary_title.strip()
+    cleaned_primary_title = re.sub(r'@\S+', '', primary_base_title).strip()
+    cleaned_primary_title = re.sub(r'Join Us On Telegram', '', cleaned_primary_title, flags=re.IGNORECASE).strip()
 
     def similarity_sorter(msg):
         media_obj = getattr(msg, msg.media.value, None)
@@ -93,55 +96,73 @@ async def create_post(client, user_id, messages):
     footer_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(btn['name'], url=btn['url'])] for btn in footer_buttons]) if footer_buttons else None
     
     header_line = "▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱"
-    footer_line = "•·•·•·•·•·•·•·•·•·••·•·•·•·•·•·•·•"
+    footer_line = "\n\n" + "•·•·•·•·•·•·•·•·•·••·•·•·•·•·•·•·•"
 
-    posts, total = [], len(messages)
-    num_posts = (total + FILES_PER_POST - 1) // FILES_PER_POST
-    for i in range(num_posts):
-        chunk = messages[i*FILES_PER_POST:(i+1)*FILES_PER_POST]
-        header = f"{base_caption_header} (Part {i+1}/{num_posts})" if num_posts > 1 else base_caption_header
-        links = []
-        for m in chunk:
-            media = getattr(m, m.media.value, None)
-            if not media: continue
-            
-            _, full_cleaned_label, _ = clean_filename(media.file_name)
-            
-            label_no_mentions = re.sub(r'@\S+', '', full_cleaned_label)
-            label_no_mentions = re.sub(r'Join Us On Telegram', '', label_no_mentions, flags=re.IGNORECASE)
-            label_no_mentions = label_no_mentions.strip()
-
-            parsed_info = PTN.parse(media.file_name)
-            extra_tags = [
-                parsed_info.get('resolution'),
-                parsed_info.get('quality'),
-                parsed_info.get('audio'),
-                parsed_info.get('codec'),
-                parsed_info.get('group')
-            ]
-            filtered_text = " | ".join(tag for tag in extra_tags if tag)
-
-            # --- BUG FIX: Link now includes the owner's user_id and the file's unique_id ---
-            # This creates a unique link for each user's file.
-            composite_id = f"{user_id}_{media.file_unique_id}"
-            link = f"http://{Config.VPS_IP}:{Config.VPS_PORT}/get/{composite_id}"
-            
-            file_entry = f"📁 `{label_no_mentions or media.file_name}`"
-            
-            if filtered_text:
-                file_entry += f"\n    `{filtered_text}`"
-            
-            file_entry += f"\n    [➤ Click Here]({link})"
-            
-            links.append(file_entry)
-
-        final_caption = f"{header_line}\n{header}\n{header_line}\n\n" + "\n\n".join(links)
-        final_caption += f"\n\n{footer_line}"
-
-        posts.append((post_poster, final_caption, footer_keyboard))
+    # Decide the character limit based on whether a poster is present
+    CAPTION_LIMIT = PHOTO_CAPTION_LIMIT if post_poster else TEXT_MESSAGE_LIMIT
+    
+    # Generate all file link entries first
+    all_link_entries = []
+    for m in messages:
+        media = getattr(m, m.media.value, None)
+        if not media: continue
         
-    return posts
+        _, full_cleaned_label, _ = clean_filename(media.file_name)
+        label_no_mentions = re.sub(r'@\S+', '', full_cleaned_label).strip()
+        label_no_mentions = re.sub(r'Join Us On Telegram', '', label_no_mentions, flags=re.IGNORECASE).strip()
 
+        parsed_info = PTN.parse(media.file_name)
+        extra_tags = [parsed_info.get(tag) for tag in ['resolution', 'quality', 'audio', 'codec', 'group']]
+        filtered_text = " | ".join(tag for tag in extra_tags if tag)
+
+        composite_id = f"{user_id}_{media.file_unique_id}"
+        link = f"http://{Config.VPS_IP}:{Config.VPS_PORT}/get/{composite_id}"
+        
+        file_entry = f"📁 `{label_no_mentions or media.file_name}`"
+        if filtered_text:
+            file_entry += f"\n    `{filtered_text}`"
+        file_entry += f"\n    [➤ Click Here]({link})"
+        all_link_entries.append(file_entry)
+
+    # Now, build posts, splitting them intelligently
+    final_posts = []
+    current_links_part = []
+    current_length = 0
+
+    # Start with base length (header + footer)
+    base_caption = f"{header_line}\n{base_caption_header}\n{header_line}"
+    current_length = len(base_caption) + len(footer_line)
+
+    for entry in all_link_entries:
+        entry_length = len(entry) + 2 # +2 for the double newline
+        
+        if current_length + entry_length > CAPTION_LIMIT:
+            # Finalize the current post because it's full
+            if current_links_part:
+                caption = base_caption + "\n\n" + "\n\n".join(current_links_part) + footer_line
+                final_posts.append((post_poster, caption, footer_keyboard))
+            
+            # Start a new post
+            current_links_part = [entry]
+            current_length = len(base_caption) + len(footer_line) + entry_length
+        else:
+            # Add to the current post
+            current_links_part.append(entry)
+            current_length += entry_length
+            
+    # Add the last remaining post
+    if current_links_part:
+        caption = base_caption + "\n\n" + "\n\n".join(current_links_part) + footer_line
+        final_posts.append((post_poster, caption, footer_keyboard))
+        
+    # If there are multiple parts, add (Part X/Y) to the headers
+    total_posts = len(final_posts)
+    if total_posts > 1:
+        for i, (poster, caption, footer) in enumerate(final_posts):
+            new_header = f"{base_caption_header} (Part {i+1}/{total_posts})"
+            final_posts[i] = (poster, caption.replace(base_caption_header, new_header), footer)
+
+    return final_posts
 
 def get_title_key(filename: str) -> str:
     base_title, _, _ = clean_filename(filename)
